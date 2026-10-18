@@ -1,0 +1,11 @@
+[Unit]
+Description=Back up the Beacon database and photos
+
+[Service]
+Type=oneshot
+User=beacon
+Group=beacon
+Environment=BEACON_DATA_DIR=/var/lib/beacon
+Environment=BACKUP_DIR=/var/backups/beacon
+Environment=KEEP=14
+ExecStart=/bin/bash /opt/beacon/scripts/backup.sh

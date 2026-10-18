@@ -1,0 +1,34 @@
+[Unit]
+Description=Beacon wiki
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=beacon
+Group=beacon
+WorkingDirectory=/opt/beacon
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning /opt/beacon/server.js
+Environment=NODE_ENV=production
+Environment=BEACON_HOST=127.0.0.1
+Environment=BEACON_PORT=3000
+Environment=BEACON_DATA_DIR=/var/lib/beacon
+Environment=BEACON_TRUST_PROXY=1
+Restart=on-failure
+RestartSec=3
+
+# Hardening: the app only needs to write its data directory.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ReadWritePaths=/var/lib/beacon
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

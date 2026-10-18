@@ -18,7 +18,7 @@ A Lighthouse Techs app: a self-hosted wiki for a technical knowledge base and th
 - "Linked from" backlinks and a click-to-zoom photo viewer
 
 **Organizing**
-- Spaces as top-level sections (Technical and Life to start; admins can add more)
+- Spaces and sub-spaces (Technical → Networking, Life → Travel…) listed in a navigation rail on the right of every page; on phones the Spaces button opens it as a drawer. A main space's page includes its sub-spaces' articles
 - Tags with optional groups (`vendor:dell`, `os:debian`), colors, autocomplete, multi-tag filtering that narrows as you add tags, and rename / merge / delete for moderators
 
 **History**
@@ -32,8 +32,10 @@ A Lighthouse Techs app: a self-hosted wiki for a technical knowledge base and th
 - The first account created becomes the admin
 - Default roles: **Admin, Moderator, Editor, Reader**. Admins can edit their permissions in a matrix and add custom roles
 - Admins and moderators can approve, revoke (signs them out everywhere immediately), reinstate, change roles, reset passwords, and sign people out
+- Password resets by email: "Forgot your password?" on the sign-in page sends a single-use link that works for 60 minutes. An admin reset locks the old password, signs the member out and emails them a link valid for 24 hours. Without email set up, admins get a one-time temporary password instead
 - Nobody can grant more access than they have, change their own role, or lock out the last admin
-- Profiles with photo, job title, team, phone, location, website, bio and any number of extra contacts (Slack, Teams, pager…). A People directory lists everyone
+- Profiles with photo, "Job title, Team / Dept @ Organization" (team and organization optional), phone, location, website, bio and any number of extra contacts (Slack, Teams, pager…)
+- The sign-in page carries an About section (editable in Site settings) that sets expectations: articles are personal experience, backed by enough fact to check
 - Audit log of every account, permission, settings and recovery action
 
 ### Default permissions
@@ -89,16 +91,59 @@ Data goes in `./data` (database, photos, avatars). Run the test suite with `npm 
    sudo bash deploy/install.sh
    ```
    This installs Node 22 if needed, creates a `beacon` system user, copies the app to `/opt/beacon`, keeps data in `/var/lib/beacon`, starts the `beacon` service on `127.0.0.1:3000`, and turns on a nightly backup to `/var/backups/beacon` (14 kept).
-4. Add a hostname to your existing tunnel. See `deploy/cloudflared-ingress.yml`. If `cloudflared` runs in a different container, set `BEACON_HOST=0.0.0.0` in `/etc/systemd/system/beacon.service` and point the tunnel at the container's LAN IP.
+4. Add a hostname to your existing tunnel. See `deploy/cloudflared-ingress.yml`. If `cloudflared` runs in a different container, set `BEACON_HOST=0.0.0.0` in `/etc/beacon/beacon.env` and point the tunnel at the container's LAN IP.
 5. Open the site and create your account first. Then set sign-up rules in **Administration → Site settings** before sharing the link.
 
-To update later, run `git -C /root/beacon pull` and then `sudo bash /root/beacon/deploy/install.sh` again. Data and backups are untouched.
+## Upgrading
+
+```bash
+git -C /root/beacon pull
+sudo bash /root/beacon/deploy/install.sh
+```
+
+Upgrades never remove or reset anything you or your members created:
+
+- Accounts, passwords, roles, articles, every revision, tags, photos and avatars stay in `/var/lib/beacon`, which the installer never touches.
+- Before the new version starts, the installer takes a full backup to `/var/backups/beacon`.
+- When the new version first starts, it saves its own copy of the database to `/var/lib/beacon/backups/pre-upgrade-v<N>-<date>.db`, then adds any new tables or columns in place. Schema changes are only ever additions.
+- Your settings in `/etc/beacon/beacon.env` (listen address, port and so on) are kept. Upgrading from 1.0 moves the values you'd set in `beacon.service` into that file automatically.
+- The previous version of the code stays in `/opt/beacon.previous`.
+
+### Rolling back
+
+```bash
+sudo systemctl stop beacon
+sudo rm -rf /opt/beacon && sudo mv /opt/beacon.previous /opt/beacon
+# Older code can't read a newer database, so put back the copy saved before the upgrade:
+sudo -u beacon cp /var/lib/beacon/backups/pre-upgrade-v1-*.db /var/lib/beacon/beacon.db
+sudo rm -f /var/lib/beacon/beacon.db-wal /var/lib/beacon/beacon.db-shm
+sudo systemctl start beacon
+```
+
+Anything written after the upgrade isn't in that copy, so roll back soon or not at all.
+
+## Email
+
+Beacon sends password reset links, password-changed notices and account-approved notices. Set it up under **Administration → Site settings → Email**, then use **Send a test email**.
+
+| Provider | Server | Port / security | Username / password |
+|:--|:--|:--|:--|
+| Gmail / Google Workspace | `smtp.gmail.com` | 587, STARTTLS | Your address and an [app password](https://myaccount.google.com/apppasswords) |
+| Microsoft 365 | `smtp.office365.com` | 587, STARTTLS | Your address and password (SMTP AUTH must be enabled for the mailbox) |
+| Fastmail | `smtp.fastmail.com` | 465, TLS | Your address and an app password |
+| Mailgun, SendGrid, Postmark, Amazon SES | From the provider | 587, STARTTLS | SMTP credentials from the provider |
+
+Also set **Public address** (for example `https://wiki.example.com`) so links in emails point at your Cloudflare hostname. It's filled in automatically from the first account's sign-up.
+
+The SMTP password is stored in Beacon's database, readable only by the `beacon` user. Use an app password or a send-only credential rather than your main account password.
 
 ### Recommended: Cloudflare Access
 
 Beacon has its own accounts, but putting a Cloudflare Access policy in front of the hostname (email one-time PIN or your identity provider) keeps the sign-up page off the public internet.
 
 ## Configuration
+
+Service settings live in `/etc/beacon/beacon.env` (copied from `deploy/beacon.env.example` on first install). Edit it, then `sudo systemctl restart beacon`.
 
 Set these in the systemd unit or your shell.
 

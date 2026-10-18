@@ -6,14 +6,9 @@ const { diffLines, hunks, stats } = require('../lib/diff');
 const { HttpError } = require('../lib/http');
 const views = require('../views/articles');
 const guide = require('../lib/guide');
+const Spaces = require('../lib/spaces');
 
 const PER_PAGE = 25;
-
-function spacesWithCounts(user) {
-  const vis = A.visibility(user);
-  return all(`SELECT s.*, (SELECT COUNT(*) FROM articles a WHERE a.space_id = s.id AND ${vis.sql}) AS count
-              FROM spaces s ORDER BY s.sort, s.name`, ...vis.params);
-}
 
 function loadVisible(ctx, slug) {
   const a = A.getArticle(slug);
@@ -47,14 +42,10 @@ module.exports = function register(router, { requirePerm, requireUser }) {
   // Home
   // -------------------------------------------------------------------------
   router.get('/', requirePerm('articles.read'), (ctx) => {
-    const spaces = spacesWithCounts(ctx.user).map((s) => ({
-      ...s,
-      recent: A.listArticles(ctx.user, { spaceId: s.id, limit: 6 }).rows,
-    }));
-    const changes = A.recentChanges(ctx.user, 14);
+    const changes = A.recentChanges(ctx.user, 16);
     const topTags = A.tagsWithCounts(ctx.user).filter((t) => t.count > 0).sort((a, b) => b.count - a.count).slice(0, 18);
-    const counts = { articles: spaces.reduce((n, s) => n + s.count, 0) };
-    return ctx.html(views.home(ctx, { spaces, changes, topTags, counts }));
+    const counts = { articles: ctx.spaceTree().reduce((n, s) => n + s.total, 0) };
+    return ctx.html(views.home(ctx, { changes, topTags, counts }));
   });
 
   // -------------------------------------------------------------------------
@@ -89,8 +80,7 @@ module.exports = function register(router, { requirePerm, requireUser }) {
     return ctx.html(views.browse(ctx, {
       heading: heading || 'All articles', intro, accent, base,
       rows, total, page, perPage: PER_PAGE,
-      spaces: ctx.spaces, activeTags, related, filters,
-      showSpaces: !space,
+      activeTags, related, filters, space,
       newHref: space ? `/new?space=${space.slug}` : '/new',
     }));
   }
@@ -98,8 +88,9 @@ module.exports = function register(router, { requirePerm, requireUser }) {
   router.get('/articles', requirePerm('articles.read'), (ctx) => browse(ctx, { base: '/articles' }));
 
   router.get('/s/:slug', requirePerm('articles.read'), (ctx) => {
-    const space = get('SELECT * FROM spaces WHERE slug = ?', ctx.params.slug);
+    const space = Spaces.getSpace(ctx.params.slug);
     if (!space) throw new HttpError(404, "That space doesn't exist.");
+    ctx.activeSpaceId = space.id;
     return browse(ctx, { space, base: `/s/${space.slug}`, heading: space.name, intro: space.description, accent: space.color });
   });
 
@@ -129,7 +120,7 @@ module.exports = function register(router, { requirePerm, requireUser }) {
     if (q) {
       ({ rows, total } = A.search(ctx.user, q, { spaceId: space && space.id, limit: PER_PAGE, offset: (page - 1) * PER_PAGE }));
     }
-    return ctx.html(views.searchPage(ctx, { q, rows, total, page, perPage: PER_PAGE, spaces: ctx.spaces, filters: { space: space ? space.slug : '' } }));
+    return ctx.html(views.searchPage(ctx, { q, rows, total, page, perPage: PER_PAGE, spaces: ctx.spaceTree(), filters: { space: space ? space.slug : '' } }));
   });
 
   router.get('/help/markdown', requirePerm('articles.read'), (ctx) => {
@@ -165,6 +156,7 @@ module.exports = function register(router, { requirePerm, requireUser }) {
   // -------------------------------------------------------------------------
   router.get('/w/:slug', requirePerm('articles.read'), (ctx) => {
     const a = loadVisible(ctx, ctx.params.slug);
+    ctx.activeSpaceId = a.space_id;
     const rendered = md.render(a.content, { resolveWikiLink: A.wikiResolver(ctx.user) });
     const lastRev = get('SELECT note, kind FROM revisions WHERE article_id = ? AND rev = ?', a.id, a.current_rev);
     return ctx.html(views.articleView(ctx, {
@@ -274,4 +266,3 @@ module.exports = function register(router, { requirePerm, requireUser }) {
   });
 };
 
-module.exports.spacesWithCounts = spacesWithCounts;

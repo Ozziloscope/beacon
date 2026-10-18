@@ -2,6 +2,7 @@
 const { html, raw, time, fmtDate, plural, fmtBytes } = require('../lib/html');
 const ui = require('./ui');
 const { icon } = require('../lib/icons');
+const { options: spaceOptions } = require('../lib/spaces');
 
 const KIND_LABEL = { create: 'Created', edit: 'Edited', publish: 'Published', unpublish: 'Unpublished', restore: 'Restored' };
 
@@ -14,54 +15,46 @@ function greeting(name) {
   return name ? `${part}, ${name.split(' ')[0]}` : part;
 }
 
-function home(ctx, { spaces, changes, topTags, counts }) {
+function home(ctx, { changes, topTags, counts }) {
   const body = html`
-  <section class="home-hero">
-    <h1>${ctx.user ? greeting(ctx.user.display_name) : ctx.settings.site_name}</h1>
-    <p class="lede">${ctx.settings.site_tagline}</p>
-    <form class="hero-search" action="/search" method="get" role="search">
-      ${icon('search', { size: 20 })}
-      <input type="search" name="q" placeholder="Search ${plural(counts.articles, 'article')}" aria-label="Search the wiki" autofocus>
-      <button class="btn btn-primary" type="submit">Search</button>
-    </form>
-    <p class="hint">Use quotes for exact phrases and a minus sign to exclude words, like <code>"bmc reset" -dell</code>.</p>
-  </section>
+  <div class="page-with-rail">
+    <div class="page-main">
+      <section class="home-hero">
+        <h1>${ctx.user ? greeting(ctx.user.display_name) : ctx.settings.site_name}</h1>
+        <p class="lede">${ctx.settings.site_tagline}</p>
+        <form class="hero-search" action="/search" method="get" role="search">
+          ${icon('search', { size: 20 })}
+          <input type="search" name="q" placeholder="Search ${plural(counts.articles, 'article')}" aria-label="Search the wiki" autofocus>
+          <button class="btn btn-primary" type="submit">Search</button>
+        </form>
+        <p class="hint">Use quotes for exact phrases and a minus sign to exclude words, like <code>"bmc reset" -dell</code>.</p>
+      </section>
 
-  <div class="home-grid">
-    <section class="home-spaces" aria-labelledby="spaces-h">
-      <h2 id="spaces-h" class="section-title">Spaces</h2>
-      ${spaces.map((sp) => html`
-      <div class="space-panel" style="--space:${sp.color}">
-        <div class="space-panel-head">
-          <a href="/s/${sp.slug}"><h3>${sp.name}</h3></a>
-          <span class="muted">${plural(sp.count, 'article')}</span>
-        </div>
-        ${sp.description ? html`<p class="muted">${sp.description}</p>` : ''}
-        ${sp.recent.length ? html`<ul class="space-recent">${sp.recent.map((a) => html`
-          <li><a href="/w/${a.slug}">${a.title}</a>${ui.statusBadge(a.status)}<span class="muted">${time(a.updated_at)}</span></li>`)}
-        </ul>` : html`<p class="muted small">Nothing here yet.${ctx.can('articles.create') ? html` <a href="/new?space=${sp.slug}">Write the first article</a>.` : ''}</p>`}
-      </div>`)}
+      <section class="home-changes" aria-labelledby="changes-h">
+        <h2 id="changes-h" class="section-title">Recent changes</h2>
+        ${changes.length ? html`<ol class="changes">${changes.map((c) => html`
+          <li class="change">
+            ${ui.avatar(c, 28)}
+            <div>
+              <p class="change-line"><a href="/w/${c.slug}">${c.title}</a> ${ui.statusBadge(c.status)}</p>
+              <p class="change-note">${c.note}</p>
+              <p class="change-meta muted">${KIND_LABEL[c.kind] || 'Edited'} by ${c.display_name || 'Beacon'} ${time(c.created_at)} in ${c.parent_space_name ? `${c.parent_space_name} / ` : ''}${c.space_name}, <a href="/w/${c.slug}/rev/${c.rev}">revision ${c.rev}</a></p>
+            </div>
+          </li>`)}</ol>` : ui.emptyState('No changes yet', 'Every save shows up here with its revision note.',
+          ctx.can('articles.create') ? html`<a class="btn btn-primary" href="/new">${icon('plus', { size: 16 })}New article</a>` : '')}
+      </section>
+    </div>
+    <aside class="rail" aria-label="Browse">
+      ${ui.spaceNav(ctx)}
       ${topTags.length ? html`
-      <h2 class="section-title">Popular tags</h2>
-      ${ui.tagList(topTags)}
-      <p><a class="small" href="/tags">All tags</a></p>` : ''}
-    </section>
-
-    <section class="home-changes" aria-labelledby="changes-h">
-      <h2 id="changes-h" class="section-title">Recent changes</h2>
-      ${changes.length ? html`<ol class="changes">${changes.map((c) => html`
-        <li class="change">
-          ${ui.avatar(c, 28)}
-          <div>
-            <p class="change-line"><a href="/w/${c.slug}">${c.title}</a> ${ui.statusBadge(c.status)}</p>
-            <p class="change-note">${c.note}</p>
-            <p class="change-meta muted">${KIND_LABEL[c.kind] || 'Edited'} by ${c.display_name || 'Beacon'} ${time(c.created_at)}, <a href="/w/${c.slug}/rev/${c.rev}">revision ${c.rev}</a></p>
-          </div>
-        </li>`)}</ol>` : ui.emptyState('No changes yet', 'Every save shows up here with its revision note.',
-        ctx.can('articles.create') ? html`<a class="btn btn-primary" href="/new">${icon('plus', { size: 16 })}New article</a>` : '')}
-    </section>
+      <div class="rail-group">
+        <p class="rail-title">Popular tags</p>
+        ${ui.tagList(topTags)}
+        <p><a class="small" href="/tags">All tags</a></p>
+      </div>` : ''}
+    </aside>
   </div>`;
-  return ui.layout(ctx, { body, bodyClass: 'home' });
+  return ui.layout(ctx, { body, bodyClass: 'home', wide: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -88,7 +81,7 @@ function toc(entries) {
 function articleView(ctx, { article: a, rendered, lastRev, backlinks, canEdit }) {
   const hasToc = rendered.toc.length >= 3;
   const body = html`
-  <div class="article-layout ${hasToc ? 'has-toc' : ''}" id="top">
+  <div class="article-layout has-toc" id="top">
     <article class="article">
       <header class="article-head">
         <div class="article-crumbs">${ui.spaceBadge(a)} ${ui.statusBadge(a.status)}</div>
@@ -121,7 +114,7 @@ function articleView(ctx, { article: a, rendered, lastRev, backlinks, canEdit })
         <p class="muted small">Created ${fmtDate(a.created_at)} by ${ui.userLink(a.author_username, a.author_name)}.</p>
       </footer>
     </article>
-    ${hasToc ? toc(rendered.toc) : ''}
+    ${hasToc ? toc(rendered.toc) : html`<aside class="rail article-rail" aria-label="Browse">${ui.spaceNav(ctx, { activeId: a.space_id })}</aside>`}
   </div>
   <div class="lightbox" data-lightbox hidden><img alt=""><p class="lightbox-caption"></p></div>`;
   return ui.layout(ctx, { title: a.title, body, wide: true });
@@ -167,7 +160,7 @@ function editor(ctx, { article, fields, errors = {}, spaces, isNew }) {
     </div>
 
     <div class="editor-meta">
-      ${ui.select({ name: 'space_id', label: 'Space', value: f.spaceId, errors, options: spaces.map((s) => ({ value: s.id, label: s.name })) })}
+      ${ui.select({ name: 'space_id', label: 'Space', value: f.spaceId, errors, options: spaceOptions(spaces) })}
       <div class="field field-tags ${errors.tags ? 'has-error' : ''}">
         <label for="f-tag-entry">Tags</label>
         <div class="tag-input" data-tag-input data-can-create="${ctx.can('tags.create') ? '1' : '0'}">
@@ -365,76 +358,78 @@ function diffView(ctx, { article: a, from, to, revisions, hunks, stats }) {
 // ---------------------------------------------------------------------------
 // Browsing, tags and search
 // ---------------------------------------------------------------------------
-function filterPanel(ctx, { base, spaces, activeTags, related, filters, showSpaces }) {
+function filterPanel(ctx, { base, activeTags, related, filters }) {
   const qs = (patch) => {
     const q = new URLSearchParams();
     const merged = { ...filters, ...patch };
-    if (merged.space && showSpaces) q.set('space', merged.space);
+    if (merged.space && base === '/articles') q.set('space', merged.space);
     if (merged.tags && merged.tags.length) q.set('tags', merged.tags.join(','));
     if (merged.sort && merged.sort !== 'updated') q.set('sort', merged.sort);
     if (merged.status) q.set('status', merged.status);
-    if (merged.q) q.set('q', merged.q);
     const s = q.toString();
     return base + (s ? `?${s}` : '');
   };
   const tagSlugs = activeTags.map((t) => t.slug);
   return html`
-  <aside class="filters" aria-label="Filters">
     ${activeTags.length ? html`
-    <div class="filter-group">
-      <p class="filter-title">Showing articles tagged</p>
+    <div class="rail-group">
+      <p class="rail-title">Showing articles tagged</p>
       <ul class="tag-list">${activeTags.map((t) => html`<li>${ui.tagChip(t, { href: qs({ tags: tagSlugs.filter((s) => s !== t.slug) }), removable: true })}</li>`)}</ul>
       <a class="small" href="${qs({ tags: [] })}">Clear tags</a>
     </div>` : ''}
     ${related.length ? html`
-    <div class="filter-group">
-      <p class="filter-title">${activeTags.length ? 'Narrow further' : 'Filter by tag'}</p>
+    <div class="rail-group">
+      <p class="rail-title">${activeTags.length ? 'Narrow further' : 'Filter by tag'}</p>
       <ul class="tag-list">${related.map((t) => html`<li>${ui.tagChip(t, { href: qs({ tags: [...tagSlugs, t.slug] }), count: t.count })}</li>`)}</ul>
     </div>` : ''}
-    ${showSpaces ? html`
-    <div class="filter-group">
-      <p class="filter-title">Space</p>
-      <ul class="filter-links">
-        <li><a href="${qs({ space: '' })}" ${!filters.space ? raw('aria-current="true"') : ''}>All spaces</a></li>
-        ${spaces.map((s) => html`<li><a href="${qs({ space: s.slug })}" ${filters.space === s.slug ? raw('aria-current="true"') : ''}><span class="space-dot" style="--space:${s.color}"></span>${s.name}</a></li>`)}
-      </ul>
-    </div>` : ''}
-    <div class="filter-group">
-      <p class="filter-title">Sort</p>
-      <ul class="filter-links">
-        ${[['updated', 'Recently updated'], ['created', 'Newest'], ['title', 'Title A–Z']].map(([k, label]) => html`<li><a href="${qs({ sort: k })}" ${(filters.sort || 'updated') === k ? raw('aria-current="true"') : ''}>${label}</a></li>`)}
-      </ul>
-    </div>
-    ${ctx.user ? html`
-    <div class="filter-group">
-      <p class="filter-title">Status</p>
-      <ul class="filter-links">
-        ${[['', 'Any'], ['published', 'Published'], ['draft', 'Drafts']].map(([k, label]) => html`<li><a href="${qs({ status: k })}" ${(filters.status || '') === k ? raw('aria-current="true"') : ''}>${label}</a></li>`)}
-      </ul>
-    </div>` : ''}
-  </aside>`;
+    <div class="rail-group rail-pair">
+      <div>
+        <p class="rail-title">Sort</p>
+        <ul class="filter-links">
+          ${[['updated', 'Updated'], ['created', 'Newest'], ['title', 'Title A–Z']].map(([k, label]) => html`<li><a href="${qs({ sort: k })}" ${(filters.sort || 'updated') === k ? raw('aria-current="true"') : ''}>${label}</a></li>`)}
+        </ul>
+      </div>
+      ${ctx.user ? html`
+      <div>
+        <p class="rail-title">Status</p>
+        <ul class="filter-links">
+          ${[['', 'Any'], ['published', 'Published'], ['draft', 'Drafts']].map(([k, label]) => html`<li><a href="${qs({ status: k })}" ${(filters.status || '') === k ? raw('aria-current="true"') : ''}>${label}</a></li>`)}
+        </ul>
+      </div>` : ''}
+    </div>`;
 }
 
-function browse(ctx, { heading, intro, accent, base, rows, total, page, perPage, spaces, activeTags, related, filters, showSpaces = true, newHref, extraHead }) {
+function browse(ctx, { heading, intro, accent, base, rows, total, page, perPage, activeTags, related, filters, newHref, space }) {
+  const crumbs = space && space.parent ? html`<p class="muted small space-crumb"><a href="/s/${space.parent.slug}">${space.parent.name}</a> /</p>` : '';
+  const subs = space && space.children && space.children.length ? html`
+    <ul class="filter-pills sub-spaces" aria-label="Sub-spaces">
+      ${space.children.map((c) => html`<li><a href="/s/${c.slug}"><span class="space-dot" style="--space:${c.color}"></span>${c.name}</a></li>`)}
+    </ul>` : '';
   const body = html`
-  <div class="page-head" ${accent ? raw(`style="--space:${accent}"`) : ''}>
-    <div class="page-head-row">
-      <div>
-        <h1 class="${accent ? 'space-title' : ''}">${heading}</h1>
-        ${intro ? html`<p class="muted">${intro}</p>` : ''}
+  <div class="page-with-rail">
+    <div class="page-main">
+      <div class="page-head" ${accent ? raw(`style="--space:${accent}"`) : ''}>
+        ${crumbs}
+        <div class="page-head-row">
+          <div>
+            <h1 class="${accent ? 'space-title' : ''}">${heading}</h1>
+            ${intro ? html`<p class="muted">${intro}</p>` : ''}
+          </div>
+          ${newHref && ctx.can('articles.create') ? html`<a class="btn btn-primary" href="${newHref}">${icon('plus', { size: 16 })}New article</a>` : ''}
+        </div>
+        ${subs}
       </div>
-      ${newHref && ctx.can('articles.create') ? html`<a class="btn btn-primary" href="${newHref}">${icon('plus', { size: 16 })}New article</a>` : ''}
+      <section class="browse-results" aria-live="polite">
+        <p class="muted small">${plural(total, 'article')}${space && space.children && space.children.length ? ', including sub-spaces' : ''}</p>
+        ${rows.length ? html`<ul class="article-list">${rows.map((a) => ui.articleRow(a))}</ul>` :
+          ui.emptyState('No articles match', activeTags.length ? 'Remove a tag filter to see more.' : 'Nothing has been written here yet.')}
+        ${ui.pagination(ctx, { total, page, perPage })}
+      </section>
     </div>
-    ${extraHead || ''}
-  </div>
-  <div class="browse">
-    ${filterPanel(ctx, { base, spaces, activeTags, related, filters, showSpaces })}
-    <section class="browse-results" aria-live="polite">
-      <p class="muted small">${plural(total, 'article')}</p>
-      ${rows.length ? html`<ul class="article-list">${rows.map((a) => ui.articleRow(a))}</ul>` :
-        ui.emptyState('No articles match', activeTags.length ? 'Remove a tag filter to see more.' : 'Nothing has been written here yet.')}
-      ${ui.pagination(ctx, { total, page, perPage })}
-    </section>
+    <aside class="rail" aria-label="Browse and filter">
+      ${ui.spaceNav(ctx, { activeId: space && space.id })}
+      ${filterPanel(ctx, { base, activeTags, related, filters })}
+    </aside>
   </div>`;
   return ui.layout(ctx, { title: typeof heading === 'string' ? heading : 'Articles', body, wide: true });
 }

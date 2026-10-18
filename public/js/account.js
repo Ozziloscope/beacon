@@ -78,3 +78,19 @@
     });
   }
 })();
+
+// Live preview of "Job title, Team / Dept @ Organization".
+(function () {
+  var out = document.querySelector('[data-role-preview]');
+  if (!out) return;
+  var f = function (n) { var el = document.querySelector('input[name="' + n + '"]'); return el ? el : { value: '', addEventListener: function () {} }; };
+  var title = f('job_title'), dept = f('department'), org = f('organization');
+  function update() {
+    var left = [title.value, dept.value].map(function (s) { return s.trim(); }).filter(Boolean).join(', ');
+    var o = org.value.trim();
+    var text = left && o ? left + ' @ ' + o : (left || o);
+    out.textContent = text || 'Add a job title';
+    out.classList.toggle('muted', !text);
+  }
+  [title, dept, org].forEach(function (el) { el.addEventListener('input', update); });
+})();

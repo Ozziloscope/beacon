@@ -3,7 +3,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const config = require('../lib/config');
-const { tx, get, all, run, now, audit, getRoleByKey, getRole } = require('../lib/db');
+const { tx, get, all, run, now, audit, getRoleByKey, getRole, setSetting } = require('../lib/db');
+const mail = require('../lib/mail');
+const emails = require('../lib/emails');
+const Resets = require('../lib/resets');
 const auth = require('../lib/auth');
 const A = require('../lib/articles');
 const { HttpError, readBody, sendFile } = require('../lib/http');
@@ -27,6 +30,14 @@ function sniffImage(buf) {
   return null;
 }
 
+/** Shown in the About column on the sign-in and sign-up pages. */
+function welcomeStats() {
+  return {
+    articles: get("SELECT COUNT(*) AS n FROM articles WHERE status = 'published' AND deleted_at IS NULL").n,
+    writers: get("SELECT COUNT(DISTINCT r.author_id) AS n FROM revisions r JOIN articles a ON a.id = r.article_id WHERE a.status = 'published' AND a.deleted_at IS NULL").n,
+  };
+}
+
 function cleanText(v, max) {
   return String(v || '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().replace(/\s+/g, ' ').slice(0, max);
 }
@@ -38,6 +49,7 @@ function validateProfile(form, { selfId } = {}) {
     email: cleanText(form.email, 200).toLowerCase(),
     job_title: cleanText(form.job_title, 80),
     department: cleanText(form.department, 80),
+    organization: cleanText(form.organization, 80),
     contact_email: cleanText(form.contact_email, 200).toLowerCase(),
     phone: cleanText(form.phone, 40),
     location: cleanText(form.location, 80),
@@ -72,7 +84,7 @@ module.exports = function register(router, { requireUser, requirePerm }) {
   router.get('/login', (ctx) => {
     if (ctx.user) return ctx.redirect(safeNext(ctx.query.next));
     if (!get('SELECT 1 FROM users LIMIT 1')) return ctx.redirect('/register');
-    return ctx.html(views.login(ctx, { next: ctx.query.next }));
+    return ctx.html(views.login(ctx, { next: ctx.query.next, stats: welcomeStats() }));
   });
 
   router.post('/login', async (ctx) => {
@@ -80,7 +92,7 @@ module.exports = function register(router, { requireUser, requirePerm }) {
     const login = cleanText(form.login, 200);
     const password = String(form.password || '');
     const next = safeNext(form.next);
-    const fail = (error, status = 401) => ctx.html(views.login(ctx, { values: { login }, error, next }), status);
+    const fail = (error, status = 401) => ctx.html(views.login(ctx, { values: { login }, error, next, stats: welcomeStats() }), status);
 
     const wait = auth.isThrottled(ctx.ip, login);
     if (wait) return fail(`Too many failed attempts. Try again in ${wait} minute${wait === 1 ? '' : 's'}.`, 429);
@@ -116,14 +128,14 @@ module.exports = function register(router, { requireUser, requirePerm }) {
   router.get('/register', (ctx) => {
     if (ctx.user) return ctx.redirect('/');
     const firstUser = !get('SELECT 1 FROM users LIMIT 1');
-    return ctx.html(views.register(ctx, { firstUser }));
+    return ctx.html(views.register(ctx, { firstUser, stats: welcomeStats() }));
   });
 
   router.post('/register', async (ctx) => {
     const form = await ctx.form();
     const firstUser = !get('SELECT 1 FROM users LIMIT 1');
     const s = ctx.settings;
-    if (s.registration === 'closed' && !firstUser) return ctx.html(views.register(ctx, { firstUser }), 403);
+    if (s.registration === 'closed' && !firstUser) return ctx.html(views.register(ctx, { firstUser, stats: welcomeStats() }), 403);
 
     const values = {
       display_name: cleanText(form.display_name, 80),
@@ -146,7 +158,7 @@ module.exports = function register(router, { requireUser, requirePerm }) {
     if (pw) errors.password = pw;
     else if (form.password !== form.password2) errors.password2 = "The passwords don't match.";
 
-    if (Object.keys(errors).length) return ctx.html(views.register(ctx, { values, errors, firstUser }), 422);
+    if (Object.keys(errors).length) return ctx.html(views.register(ctx, { values, errors, firstUser, stats: welcomeStats() }), 422);
 
     let role, status;
     if (firstUser) { role = getRoleByKey('admin'); status = 'active'; }
@@ -170,9 +182,75 @@ module.exports = function register(router, { requireUser, requirePerm }) {
         text: `Thanks, ${values.display_name.split(' ')[0]}. An admin or moderator will review your account. Once it's approved you can sign in with the username @${values.username}.`,
       }));
     }
+    // Remember this site's public address for links in emails.
+    if (firstUser && !s.site_url) setSetting('site_url', ctx.publicUrl());
     ctx.startSession(id);
     ctx.setFlash('success', firstUser ? 'Welcome. Your admin account is ready.' : `Welcome to ${s.site_name}. Add a photo and contact details so people can reach you.`);
     return ctx.redirect(firstUser ? '/admin' : '/account');
+  });
+
+  // -------------------------------------------------------------------------
+  // Forgotten passwords: emailed, single-use, expiring links
+  // -------------------------------------------------------------------------
+  router.get('/forgot', (ctx) => {
+    if (ctx.user) return ctx.redirect('/account');
+    return ctx.html(views.forgot(ctx, { mailReady: mail.isConfigured(ctx.settings) }));
+  });
+
+  router.post('/forgot', async (ctx) => {
+    const form = await ctx.form();
+    const login = cleanText(form.login, 200);
+    const mailReady = mail.isConfigured(ctx.settings);
+    if (!mailReady) return ctx.html(views.forgot(ctx, { mailReady }));
+    if (!login) return ctx.html(views.forgot(ctx, { mailReady, error: 'Enter your username or email.' }), 422);
+    if (!Resets.allow(`ip:${ctx.ip}`, 10)) {
+      return ctx.html(views.forgot(ctx, { mailReady, values: { login }, error: 'Too many reset requests from this network. Try again in 15 minutes.' }), 429);
+    }
+    const user = get("SELECT id, username, email, display_name, status FROM users WHERE username = ? OR email = ?", login, login.toLowerCase());
+    // The response is the same whether or not the account exists.
+    if (user && user.status === 'active' && Resets.allow(`user:${user.id}`, 3)) {
+      try {
+        await Resets.sendLink(user, { baseUrl: ctx.publicUrl(), ip: ctx.ip });
+      } catch (err) {
+        console.error(`[mail] reset link for @${user.username} failed: ${err.message}`);
+        audit(user.id, 'mail.error', `@${user.username}`, `Reset link not sent: ${err.message}`, ctx.ip);
+      }
+    }
+    return ctx.html(views.forgot(ctx, { mailReady, sent: true, values: { login } }));
+  });
+
+  router.get('/reset/:token', (ctx) => {
+    ctx.res.setHeader('Referrer-Policy', 'no-referrer');
+    const reset = Resets.find(ctx.params.token);
+    return ctx.html(views.resetForm(ctx, { reset, token: ctx.params.token }), reset ? 200 : 410);
+  });
+
+  router.post('/reset/:token', async (ctx) => {
+    const form = await ctx.form();
+    const token = ctx.params.token;
+    const reset = Resets.find(token);
+    if (!reset) return ctx.html(views.resetForm(ctx, { reset: null, token }), 410);
+    const errors = {};
+    const problem = auth.passwordProblem(form.password, { username: reset.username, email: reset.email });
+    if (problem) errors.password = problem;
+    else if (form.password !== form.password2) errors.password2 = "The passwords don't match.";
+    if (Object.keys(errors).length) return ctx.html(views.resetForm(ctx, { reset, token, errors }), 422);
+
+    tx(() => {
+      if (!Resets.consume(token)) throw new HttpError(410, 'This reset link was just used. Request a new one.');
+      run('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?', auth.hashPassword(form.password), reset.user_id);
+      auth.destroyUserSessions(reset.user_id);
+      audit(reset.user_id, 'user.password_reset', `@${reset.username}`, 'Password set from an emailed link', ctx.ip);
+    });
+    auth.clearFailures(ctx.ip, reset.username);
+    ctx.startSession(reset.user_id);
+    const msg = emails.passwordChanged({
+      site: ctx.settings.site_name, name: reset.display_name.split(' ')[0],
+      when: new Date().toUTCString(), ip: ctx.ip, link: `${ctx.publicUrl()}/forgot`,
+    });
+    mail.send({ to: reset.email, ...msg }, ctx.settings).catch((e) => console.error(`[mail] change notice failed: ${e.message}`));
+    ctx.setFlash('success', 'Password saved. You are signed in, and every other device was signed out.');
+    return ctx.redirect('/');
   });
 
   // -------------------------------------------------------------------------
@@ -188,8 +266,8 @@ module.exports = function register(router, { requireUser, requirePerm }) {
     if (Object.keys(errors).length) {
       return ctx.html(views.account(ctx, { values: { ...values, username: ctx.user.username }, errors, sessions: auth.listSessions(ctx.user.id, ctx.token) }), 422);
     }
-    run(`UPDATE users SET display_name = ?, email = ?, job_title = ?, department = ?, contact_email = ?, phone = ?, location = ?, website = ?, bio = ?, contacts = ? WHERE id = ?`,
-      values.display_name, values.email, values.job_title, values.department, values.contact_email, values.phone,
+    run(`UPDATE users SET display_name = ?, email = ?, job_title = ?, department = ?, organization = ?, contact_email = ?, phone = ?, location = ?, website = ?, bio = ?, contacts = ? WHERE id = ?`,
+      values.display_name, values.email, values.job_title, values.department, values.organization, values.contact_email, values.phone,
       values.location, values.website, values.bio, JSON.stringify(values.contacts), ctx.user.id);
     ctx.setFlash('success', 'Profile saved.');
     return ctx.redirect('/account');
@@ -243,17 +321,10 @@ module.exports = function register(router, { requireUser, requirePerm }) {
   });
 
   // -------------------------------------------------------------------------
-  // People
+  // Profiles
   // -------------------------------------------------------------------------
-  router.get('/people', requirePerm('articles.read'), requireUser, (ctx) => {
-    const q = cleanText(ctx.query.q, 80);
-    const like = `%${q.replace(/[%_]/g, '')}%`;
-    const users = all(`SELECT id, username, display_name, avatar, job_title, department, email, contact_email, phone, location
-                       FROM users WHERE status = 'active'
-                       ${q ? 'AND (display_name LIKE ? OR username LIKE ? OR job_title LIKE ? OR department LIKE ? OR location LIKE ?)' : ''}
-                       ORDER BY display_name COLLATE NOCASE LIMIT 500`, ...(q ? [like, like, like, like, like] : []));
-    return ctx.html(views.people(ctx, { users, q }));
-  });
+  // The People directory was removed in 1.1; old bookmarks land on the home page.
+  router.get('/people', (ctx) => ctx.redirect('/', 301));
 
   router.get('/u/:username', requirePerm('articles.read'), requireUser, (ctx) => {
     const row = get('SELECT id FROM users WHERE username = ?', ctx.params.username);

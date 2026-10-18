@@ -2,40 +2,68 @@
 const { html, raw, time, fmtDate, plural } = require('../lib/html');
 const ui = require('./ui');
 const { icon } = require('../lib/icons');
+const md = require('../public/js/markdown');
 
-function login(ctx, { values = {}, error, next }) {
+/**
+ * Sign-in and sign-up pages: an editorial About column beside the form.
+ * stats: { articles, writers }
+ */
+function welcome(ctx, { title, card, stats }) {
   const s = ctx.settings;
-  return ui.authLayout(ctx, {
-    title: 'Sign in',
+  const about = md.render(s.about_text || '').html;
+  return ui.layout(ctx, {
+    title,
+    bodyClass: 'welcome-page',
+    wide: true,
     body: html`
+    <div class="welcome">
+      <section class="welcome-about" aria-labelledby="about-h">
+        <p class="welcome-headline">${s.site_tagline}</p>
+        <h2 id="about-h" class="welcome-label">About ${s.site_name}</h2>
+        <div class="welcome-text">${raw(about)}</div>
+        ${stats && stats.articles ? html`<p class="welcome-stats"><strong>${plural(stats.articles, 'article')}</strong> from <strong>${plural(stats.writers, 'writer')}</strong> so far.</p>` : ''}
+      </section>
+      <div class="welcome-card">${card}</div>
+    </div>`,
+  });
+}
+
+function login(ctx, { values = {}, error, next, stats }) {
+  const s = ctx.settings;
+  return welcome(ctx, {
+    title: 'Sign in',
+    stats,
+    card: html`
     <div class="auth-card">
-      <h1>Sign in to ${s.site_name}</h1>
+      <h1>Sign in</h1>
       ${error ? html`<div class="form-errors" role="alert">${error}</div>` : ''}
       <form method="post" action="/login" class="stack">
         ${ui.csrfField(ctx)}
         <input type="hidden" name="next" value="${next || ''}">
         ${ui.input({ name: 'login', label: 'Username or email', value: values.login, required: true, autocomplete: 'username', attrs: 'autofocus' })}
         ${ui.input({ name: 'password', label: 'Password', type: 'password', required: true, autocomplete: 'current-password' })}
+        <p class="forgot-link"><a href="/forgot">Forgot your password?</a></p>
         <button class="btn btn-primary btn-block" type="submit">Sign in</button>
       </form>
       ${s.registration !== 'closed' ? html`<p class="auth-alt">New here? <a href="/register">Create an account</a></p>` : ''}
-      <p class="auth-alt muted small">Forgot your password? Ask an admin to reset it from Administration.</p>
     </div>`,
   });
 }
 
-function register(ctx, { values = {}, errors = {}, firstUser }) {
+function register(ctx, { values = {}, errors = {}, firstUser, stats }) {
   const s = ctx.settings;
   if (s.registration === 'closed' && !firstUser) {
-    return ui.authLayout(ctx, {
+    return welcome(ctx, {
       title: 'Registration closed',
-      body: html`<div class="auth-card"><h1>Registration is closed</h1><p>New accounts are created by an admin. Ask whoever runs ${s.site_name} to invite you.</p><p><a href="/login">Sign in</a></p></div>`,
+      stats,
+      card: html`<div class="auth-card"><h1>Registration is closed</h1><p>New accounts are created by an admin. Ask whoever runs ${s.site_name} to invite you.</p><p><a class="btn btn-block" href="/login">Sign in</a></p></div>`,
     });
   }
   const errList = Object.values(errors);
-  return ui.authLayout(ctx, {
+  return welcome(ctx, {
     title: 'Create account',
-    body: html`
+    stats,
+    card: html`
     <div class="auth-card">
       <h1>Create your account</h1>
       ${firstUser ? html`<p class="callout-inline">You're the first person here, so this account becomes the admin.</p>` :
@@ -46,7 +74,7 @@ function register(ctx, { values = {}, errors = {}, firstUser }) {
         ${ui.input({ name: 'display_name', label: 'Your name', value: values.display_name, errors, required: true, autocomplete: 'name', attrs: 'autofocus maxlength="80"' })}
         ${ui.input({ name: 'username', label: 'Username', value: values.username, errors, required: true, autocomplete: 'username', hint: '3–32 characters: letters, numbers, dots, hyphens and underscores.', attrs: 'maxlength="32" pattern="[A-Za-z0-9._-]{3,32}"' })}
         ${ui.input({ name: 'email', label: 'Email', type: 'email', value: values.email, errors, required: true, autocomplete: 'email',
-          hint: s.allowed_email_domains ? `Use an address at ${s.allowed_email_domains.split(',').map((d) => d.trim()).join(' or ')}.` : '' })}
+          hint: s.allowed_email_domains ? `Use an address at ${s.allowed_email_domains.split(',').map((d) => d.trim()).join(' or ')}.` : 'Used to sign in and to reset your password.' })}
         ${ui.input({ name: 'password', label: 'Password', type: 'password', errors, required: true, autocomplete: 'new-password', hint: 'At least 10 characters. A short sentence works well.', attrs: 'minlength="10"' })}
         ${ui.input({ name: 'password2', label: 'Confirm password', type: 'password', errors, required: true, autocomplete: 'new-password' })}
         <button class="btn btn-primary btn-block" type="submit">Create account</button>
@@ -54,6 +82,58 @@ function register(ctx, { values = {}, errors = {}, firstUser }) {
       <p class="auth-alt">Already have an account? <a href="/login">Sign in</a></p>
     </div>`,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Password reset
+// ---------------------------------------------------------------------------
+function forgot(ctx, { values = {}, sent, mailReady, error }) {
+  if (!mailReady) {
+    return ui.authLayout(ctx, { title: 'Reset your password', body: html`
+      <div class="auth-card"><h1>Reset your password</h1>
+        <p>Password reset by email isn't set up on this site yet. Ask an admin to reset your password from Administration.</p>
+        <p><a href="/login">Back to sign in</a></p></div>` });
+  }
+  if (sent) {
+    return ui.authLayout(ctx, { title: 'Check your email', body: html`
+      <div class="auth-card"><h1>Check your email</h1>
+        <p>If an active account matches <strong>${values.login}</strong>, we've sent a link to its email address. The link works once, for 60 minutes.</p>
+        <p class="muted small">Nothing after a few minutes? Check your spam folder, or try again with your username instead of your email.</p>
+        <p><a href="/login">Back to sign in</a></p></div>` });
+  }
+  return ui.authLayout(ctx, { title: 'Reset your password', body: html`
+    <div class="auth-card">
+      <h1>Reset your password</h1>
+      <p class="muted">Enter your username or email. We'll email you a link to choose a new password.</p>
+      ${error ? html`<div class="form-errors" role="alert">${error}</div>` : ''}
+      <form method="post" action="/forgot" class="stack">
+        ${ui.csrfField(ctx)}
+        ${ui.input({ name: 'login', label: 'Username or email', value: values.login, required: true, autocomplete: 'username', attrs: 'autofocus maxlength="200"' })}
+        <button class="btn btn-primary btn-block" type="submit">Email me a reset link</button>
+      </form>
+      <p class="auth-alt"><a href="/login">Back to sign in</a></p>
+    </div>` });
+}
+
+function resetForm(ctx, { reset, token, errors = {} }) {
+  if (!reset) {
+    return ui.authLayout(ctx, { title: 'Link expired', body: html`
+      <div class="auth-card"><h1>This link has expired</h1>
+        <p>Reset links work once, and only for a limited time. Request a new one and use the most recent email.</p>
+        <p><a class="btn btn-primary btn-block" href="/forgot">Request a new link</a></p></div>` });
+  }
+  return ui.authLayout(ctx, { title: 'Choose a new password', body: html`
+    <div class="auth-card">
+      <h1>Choose a new password</h1>
+      <p class="muted">For <strong>@${reset.username}</strong>. Saving it signs you out on every other device.</p>
+      <form method="post" action="/reset/${token}" class="stack" novalidate>
+        ${ui.csrfField(ctx)}
+        <input type="text" name="username" value="${reset.username}" autocomplete="username" hidden>
+        ${ui.input({ name: 'password', label: 'New password', type: 'password', errors, required: true, autocomplete: 'new-password', hint: 'At least 10 characters. A short sentence works well.', attrs: 'minlength="10" autofocus' })}
+        ${ui.input({ name: 'password2', label: 'Confirm new password', type: 'password', errors, required: true, autocomplete: 'new-password' })}
+        <button class="btn btn-primary btn-block" type="submit">Save password and sign in</button>
+      </form>
+    </div>` });
 }
 
 function message(ctx, { title, text, action }) {
@@ -88,7 +168,7 @@ function profile(ctx, { profileUser: u, articles, edits, isSelf }) {
       ${ui.avatar(u, 120)}
       <h1>${u.display_name}</h1>
       <p class="muted">@${u.username}</p>
-      ${u.job_title || u.department ? html`<p class="profile-role">${u.job_title}${u.job_title && u.department ? ', ' : ''}${u.department}</p>` : ''}
+      ${ui.roleLine(u) ? html`<p class="profile-role">${ui.roleLine(u)}</p>` : ''}
       <p><span class="role-pill">${u.role_name}</span>${u.status !== 'active' ? html` <span class="badge badge-warn">${u.status === 'revoked' ? 'Access revoked' : 'Awaiting approval'}</span>` : ''}</p>
       ${u.bio ? html`<p class="profile-bio">${u.bio}</p>` : ''}
       ${rows.length ? html`<dl class="contact-list">${rows.map(([ic, label, value]) => html`
@@ -112,28 +192,6 @@ function profile(ctx, { profileUser: u, articles, edits, isSelf }) {
     </div>
   </div>`;
   return ui.layout(ctx, { title: u.display_name, body });
-}
-
-function people(ctx, { users, q }) {
-  const body = html`
-  <div class="page-head">
-    <h1>People</h1>
-    <form method="get" action="/people" class="inline-form people-search">
-      <label class="sr-only" for="people-q">Search people</label>
-      <input id="people-q" type="search" name="q" value="${q || ''}" placeholder="Name, team, title or location">
-      <button class="btn" type="submit">Search</button>
-    </form>
-  </div>
-  ${users.length ? html`<ul class="people-grid">${users.map((u) => html`
-    <li class="person">
-      <a href="/u/${u.username}" class="person-link">${ui.avatar(u, 48)}
-        <span><strong>${u.display_name}</strong><span class="muted">${u.job_title || '@' + u.username}${u.department ? `, ${u.department}` : ''}</span></span></a>
-      <div class="person-contacts">
-        ${u.contact_email || u.email ? html`<a class="icon-btn" href="mailto:${u.contact_email || u.email}" aria-label="Email ${u.display_name}" title="${u.contact_email || u.email}">${icon('mail', { size: 17 })}</a>` : ''}
-        ${u.phone ? html`<a class="icon-btn" href="tel:${u.phone.replace(/[^\d+]/g, '')}" aria-label="Call ${u.display_name}" title="${u.phone}">${icon('phone', { size: 17 })}</a>` : ''}
-      </div>
-    </li>`)}</ul>` : ui.emptyState('Nobody matches', 'Try a different name or team.')}`;
-  return ui.layout(ctx, { title: 'People', body });
 }
 
 // ---------------------------------------------------------------------------
@@ -170,7 +228,9 @@ function account(ctx, { values, errors = {}, pwErrors = {}, sessions }) {
           ${ui.input({ name: 'display_name', label: 'Name', value: v.display_name, errors, required: true, attrs: 'maxlength="80"' })}
           ${ui.input({ name: 'email', label: 'Sign-in email', type: 'email', value: v.email, errors, required: true, hint: 'Used to sign in.' })}
           ${ui.input({ name: 'job_title', label: 'Job title', value: v.job_title, errors, attrs: 'maxlength="80"' })}
-          ${ui.input({ name: 'department', label: 'Team or department', value: v.department, errors, attrs: 'maxlength="80"' })}
+          ${ui.input({ name: 'department', label: 'Team / Dept (optional)', value: v.department, errors, attrs: 'maxlength="80"' })}
+          ${ui.input({ name: 'organization', label: 'Organization (optional)', value: v.organization, errors, attrs: 'maxlength="80"', hint: html`Shown as <em>Job title, Team / Dept @ Organization</em>.` })}
+          <div class="field role-preview" aria-live="polite"><span class="hint">Preview</span><p data-role-preview>${ui.roleLine(v) || html`<span class="muted">Add a job title</span>`}</p></div>
           ${ui.input({ name: 'contact_email', label: 'Contact email', type: 'email', value: v.contact_email, errors, hint: 'Shown on your profile instead of your sign-in email.' })}
           ${ui.input({ name: 'phone', label: 'Phone', type: 'tel', value: v.phone, errors, attrs: 'maxlength="40"' })}
           ${ui.input({ name: 'location', label: 'Location', value: v.location, errors, attrs: 'maxlength="80"', placeholder: 'City, site or timezone' })}
@@ -225,4 +285,4 @@ function describeAgent(ua) {
   return os ? `${browser} on ${os}` : browser;
 }
 
-module.exports = { login, register, message, profile, people, account, contactRows };
+module.exports = { login, register, forgot, resetForm, message, profile, account, contactRows };

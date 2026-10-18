@@ -10,10 +10,9 @@ Group=beacon
 WorkingDirectory=/opt/beacon
 ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning /opt/beacon/server.js
 Environment=NODE_ENV=production
-Environment=BEACON_HOST=127.0.0.1
-Environment=BEACON_PORT=3000
-Environment=BEACON_DATA_DIR=/var/lib/beacon
-Environment=BEACON_TRUST_PROXY=1
+# Your settings (host, port, data directory…) live in /etc/beacon/beacon.env.
+# The installer creates that file once and never overwrites it on upgrades.
+EnvironmentFile=/etc/beacon/beacon.env
 Restart=on-failure
 RestartSec=3
 

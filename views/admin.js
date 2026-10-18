@@ -103,7 +103,7 @@ function users(ctx, { rows, roles, filters, total, page, perPage }) {
   });
 }
 
-function userDetail(ctx, { target: u, roles, canManage, assignable, sessions, tempPassword, auditRows, isLastAdmin }) {
+function userDetail(ctx, { target: u, roles, canManage, assignable, sessions, tempPassword, mailError, mailReady, auditRows, isLastAdmin }) {
   return adminLayout(ctx, {
     title: u.display_name,
     active: '/admin/users',
@@ -112,6 +112,7 @@ function userDetail(ctx, { target: u, roles, canManage, assignable, sessions, te
       ${ui.avatar(u, 64)}
       <div>
         <p><strong>@${u.username}</strong> ${statusPill(u.status)}</p>
+        ${ui.roleLine(u) ? html`<p>${ui.roleLine(u)}</p>` : ''}
         <p class="muted">${u.email}. Joined ${fmtDate(u.created_at)}. ${u.last_login_at ? html`Last signed in ${time(u.last_login_at)}.` : 'Never signed in.'}</p>
         <p><a href="/u/${u.username}">View profile</a></p>
       </div>
@@ -122,6 +123,7 @@ function userDetail(ctx, { target: u, roles, canManage, assignable, sessions, te
       <p class="callout-title">Temporary password for @${u.username}</p>
       <p><code class="big-code">${tempPassword}</code></p>
       <p>Send it to them privately. It's shown only once, and they'll be asked to choose a new password after signing in.</p>
+      ${mailError ? html`<p><strong>The reset email wasn't sent:</strong> ${mailError}</p>` : !mailReady ? html`<p class="small">Set up email under <a href="/admin/settings#email">Site settings</a> and future resets send a link to the member automatically.</p>` : ''}
     </div>` : ''}
 
     ${!canManage ? html`<div class="callout callout-info"><p class="callout-title">View only</p><p>${ctx.user.id === u.id ? 'You can’t change your own role or access. Ask another admin.' : 'This member’s role has permissions you don’t have, so only an admin can change it.'}</p></div>` : ''}
@@ -173,7 +175,7 @@ function userDetail(ctx, { target: u, roles, canManage, assignable, sessions, te
         <h3>Password and sessions</h3>
         <p class="muted small">${plural(sessions.length, 'active session')}</p>
         <div class="btn-row">
-          <form method="post" action="/admin/users/${u.id}/reset-password" data-confirm="Reset @${u.username}'s password? Their current password stops working right away.">${ui.csrfField(ctx)}<button class="btn" type="submit">${icon('key', { size: 16 })}Reset password</button></form>
+          <form method="post" action="/admin/users/${u.id}/reset-password" data-confirm="Reset @${u.username}'s password? Their current password stops working and they're signed out. ${mailReady ? `A reset link is emailed to ${u.email}.` : 'You get a temporary password to pass on.'}">${ui.csrfField(ctx)}<button class="btn" type="submit">${icon('key', { size: 16 })}${mailReady ? 'Reset and email a link' : 'Reset password'}</button></form>
           <form method="post" action="/admin/users/${u.id}/signout">${ui.csrfField(ctx)}<button class="btn btn-ghost" type="submit" ${sessions.length ? '' : raw('disabled')}>Sign out everywhere</button></form>
         </div>
       </section>
@@ -275,13 +277,24 @@ function tags(ctx, { rows, q }) {
 }
 
 function spaces(ctx, { rows, errors = {}, values = {} }) {
+  const mains = rows.filter((r) => !r.parent_id);
+  const ordered = [];
+  for (const m of mains) {
+    ordered.push(m);
+    for (const c of rows.filter((r) => r.parent_id === m.id)) ordered.push(c);
+  }
+  for (const r of rows) if (!ordered.includes(r)) ordered.push(r);
+  const parentSelect = (s, selected) => html`<select name="parent_id" ${s && s.child_count ? raw('disabled title="Has sub-spaces, so it stays a main space"') : ''}>
+      <option value="">None (main space)</option>
+      ${mains.filter((m) => !s || m.id !== s.id).map((m) => html`<option value="${m.id}" ${String(selected) === String(m.id) ? raw('selected') : ''}>${m.name}</option>`)}
+    </select>`;
   return adminLayout(ctx, {
     title: 'Spaces',
     active: '/admin/spaces',
     body: html`
-    <p class="muted">Spaces are the top-level sections shown in the header. Every article belongs to one.</p>
-    <ul class="space-admin-list">${rows.map((s) => html`
-      <li style="--space:${s.color}">
+    <p class="muted">Spaces are listed in the navigation on the right of every page. A main space can hold sub-spaces one level deep, and a main space's page also lists the articles in its sub-spaces.</p>
+    <ul class="space-admin-list">${ordered.map((s) => html`
+      <li style="--space:${s.color}" class="${s.parent_id ? 'is-sub' : ''}">
         <form method="post" action="/admin/spaces/${s.id}" class="space-edit">
           ${ui.csrfField(ctx)}
           <div class="grid-4">
@@ -290,10 +303,13 @@ function spaces(ctx, { rows, errors = {}, values = {} }) {
             <label>Order<input name="sort" type="number" value="${s.sort}" min="0" max="999"></label>
             <label>Color<input name="color" type="color" value="${s.color}"></label>
           </div>
-          <label>Description<input name="description" value="${s.description}" maxlength="200"></label>
-          <div class="btn-row"><button class="btn btn-sm" type="submit">Save</button><span class="muted small">${plural(s.count, 'article')}</span></div>
+          <div class="grid-2">
+            <label>Description<input name="description" value="${s.description}" maxlength="200"></label>
+            <label>Inside${parentSelect(s, s.parent_id)}${s.child_count ? html`<input type="hidden" name="parent_id" value="">` : ''}</label>
+          </div>
+          <div class="btn-row"><button class="btn btn-sm" type="submit">Save</button><span class="muted small">${plural(s.count, 'article')}${s.child_count ? `, ${plural(s.child_count, 'sub-space')}` : ''}</span></div>
         </form>
-        ${s.count === 0 ? html`<form method="post" action="/admin/spaces/${s.id}/delete" data-confirm="Delete the ${s.name} space?">${ui.csrfField(ctx)}<button class="btn btn-sm btn-ghost btn-danger-text" type="submit">Delete</button></form>` : ''}
+        ${s.count === 0 && !s.child_count ? html`<form method="post" action="/admin/spaces/${s.id}/delete" data-confirm="Delete the ${s.name} space?">${ui.csrfField(ctx)}<button class="btn btn-sm btn-ghost btn-danger-text" type="submit">Delete</button></form>` : ''}
       </li>`)}</ul>
     <section class="admin-section">
       <h2>Add a space</h2>
@@ -303,14 +319,18 @@ function spaces(ctx, { rows, errors = {}, values = {} }) {
           ${ui.input({ name: 'name', label: 'Name', value: values.name, errors, required: true, attrs: 'maxlength="40"' })}
           ${ui.input({ name: 'slug', label: 'URL', value: values.slug, errors, hint: 'Lowercase letters, numbers and hyphens. Leave blank to use the name.', attrs: 'maxlength="40"' })}
         </div>
-        ${ui.input({ name: 'description', label: 'Description', value: values.description, errors, attrs: 'maxlength="200"' })}
+        <div class="grid-2">
+          ${ui.input({ name: 'description', label: 'Description', value: values.description, errors, attrs: 'maxlength="200"' })}
+          <div class="field ${errors.parent_id ? 'has-error' : ''}"><label for="f-parent">Inside</label>${raw(String(parentSelect(null, values.parent_id)).replace('<select ', '<select id="f-parent" '))}
+            <p class="hint">Choose a main space to make this a sub-space of it.</p>${ui.fieldError(errors, 'parent_id')}</div>
+        </div>
         <div><button class="btn" type="submit">Add space</button></div>
       </form>
     </section>`,
   });
 }
 
-function settings(ctx, { values, roles: roleList, errors = {} }) {
+function settings(ctx, { values, roles: roleList, errors = {}, mailReady, detectedUrl }) {
   return adminLayout(ctx, {
     title: 'Site settings',
     active: '/admin/settings',
@@ -323,6 +343,13 @@ function settings(ctx, { values, roles: roleList, errors = {} }) {
         ${ui.input({ name: 'site_tagline', label: 'Tagline on the home page', value: values.site_tagline, errors, attrs: 'maxlength="160"' })}
         <label class="check"><input type="checkbox" name="require_login" value="1" ${values.require_login === '1' ? raw('checked') : ''}> Only signed-in members can read articles</label>
         <p class="hint">Turn this off to let anyone with the link read published articles. Drafts always stay private.</p>
+        ${ui.input({ name: 'site_url', label: 'Public address', value: values.site_url, errors, type: 'url', placeholder: detectedUrl || 'https://wiki.example.com',
+          hint: 'The address people use to reach this site. Links in emails point here.' })}
+      </section>
+      <section class="admin-section">
+        <h2>About</h2>
+        ${ui.textarea({ name: 'about_text', label: 'About text on the sign-in page', value: values.about_text, errors, rows: 9, attrs: 'maxlength="4000"',
+          hint: html`Shown next to the sign-in and sign-up forms, under the tagline. Markdown works; separate paragraphs with a blank line.` })}
       </section>
       <section class="admin-section">
         <h2>Sign-ups</h2>
@@ -338,7 +365,33 @@ function settings(ctx, { values, roles: roleList, errors = {} }) {
         ${ui.input({ name: 'allowed_email_domains', label: 'Allowed email domains', value: values.allowed_email_domains, errors, placeholder: 'example.com, example.org',
           hint: 'Comma separated. Leave blank to allow any address.' })}
       </section>
-      <div><button class="btn btn-primary" type="submit">Save settings</button></div>
+      <section class="admin-section" id="email">
+        <h2>Email</h2>
+        <p class="muted">Used for password reset links and account notices. Any SMTP service works. For Gmail or Google Workspace use <code>smtp.gmail.com</code>, port 587, STARTTLS, and an app password.</p>
+        <p>${mailReady ? html`<span class="status-pill status-active">Set up</span>` : html`<span class="status-pill status-pending">Not set up</span> <span class="muted small">Until it is, admins reset passwords with a one-time temporary password.</span>`}</p>
+        <div class="grid-2">
+          ${ui.input({ name: 'smtp_host', label: 'Mail server', value: values.smtp_host, errors, placeholder: 'smtp.example.com', attrs: 'autocomplete="off"' })}
+          <div class="grid-2 grid-tight">
+            ${ui.input({ name: 'smtp_port', label: 'Port', value: values.smtp_port, errors, type: 'number', attrs: 'min="1" max="65535"' })}
+            ${ui.select({ name: 'smtp_security', label: 'Security', value: values.smtp_security, errors, options: [
+              { value: 'starttls', label: 'STARTTLS (587)' }, { value: 'tls', label: 'TLS (465)' }, { value: 'none', label: 'None' }] })}
+          </div>
+          ${ui.input({ name: 'smtp_user', label: 'Username', value: values.smtp_user, errors, attrs: 'autocomplete="off"' })}
+          <div class="field">
+            <label for="f-smtp_pass">Password</label>
+            <input id="f-smtp_pass" name="smtp_pass" type="password" value="" autocomplete="new-password" placeholder="${values.smtp_pass ? 'Saved. Type to replace it.' : ''}">
+            ${values.smtp_pass ? html`<label class="check small"><input type="checkbox" name="smtp_pass_clear" value="1"> Remove the saved password</label>` : ''}
+          </div>
+        </div>
+        ${ui.input({ name: 'mail_from', label: 'Send emails from', value: values.mail_from, errors, placeholder: `${values.site_name || 'Beacon'} <wiki@example.com>`,
+          hint: 'Most providers require an address on your own domain or the account you sign in with.' })}
+      </section>
+      <div class="btn-row"><button class="btn btn-primary" type="submit">Save settings</button></div>
+    </form>
+    <form method="post" action="/admin/settings/test-email" class="test-email">
+      ${ui.csrfField(ctx)}
+      <button class="btn" type="submit" ${mailReady ? '' : raw('disabled')}>${icon('mail', { size: 16 })}Send a test email to ${ctx.user.email}</button>
+      <span class="hint">Save your email settings first.</span>
     </form>`,
   });
 }
@@ -346,6 +399,7 @@ function settings(ctx, { values, roles: roleList, errors = {} }) {
 const ACTION_LABEL = {
   'user.register': 'Registered', 'user.approve': 'Approved account', 'user.role': 'Changed role', 'user.revoke': 'Revoked access',
   'user.reinstate': 'Reinstated access', 'user.reset_password': 'Reset password', 'user.signout': 'Signed out all sessions',
+  'user.reset_link': 'Emailed reset link', 'user.password_reset': 'Set new password from link', 'mail.error': 'Email failed',
   'role.create': 'Created role', 'role.update': 'Updated role', 'role.delete': 'Deleted role', 'role.permissions': 'Changed permissions',
   'tag.update': 'Updated tag', 'tag.merge': 'Merged tags', 'tag.delete': 'Deleted tag',
   'space.create': 'Created space', 'space.update': 'Updated space', 'space.delete': 'Deleted space',

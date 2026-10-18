@@ -50,12 +50,20 @@
     });
   });
 
-  var navToggle = $('[data-nav-toggle]'), nav = $('#main-nav');
-  if (navToggle && nav) {
-    navToggle.addEventListener('click', function () {
-      var open = nav.classList.toggle('open');
-      navToggle.setAttribute('aria-expanded', String(open));
-    });
+  // Spaces drawer (right side). Opened from the header; Esc, the backdrop or a link closes it.
+  var drawer = $('#spaces-drawer'), backdrop = $('.drawer-backdrop'), opener = $('[data-drawer-open]');
+  if (drawer && opener) {
+    var setDrawer = function (open) {
+      drawer.hidden = !open;
+      backdrop.hidden = !open;
+      opener.setAttribute('aria-expanded', String(open));
+      document.body.style.overflow = open ? 'hidden' : '';
+      if (open) { var cur = $('[aria-current="page"]', drawer) || $('a', drawer); if (cur) cur.focus(); }
+      else opener.focus();
+    };
+    opener.addEventListener('click', function () { setDrawer(drawer.hidden); });
+    $$('[data-drawer-close]').forEach(function (el) { el.addEventListener('click', function () { setDrawer(false); }); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !drawer.hidden) setDrawer(false); });
   }
 
   // ---------------------------------------------------------------- flashes

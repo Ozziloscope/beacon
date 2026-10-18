@@ -27,6 +27,18 @@ function avatar(u, size = 32) {
   return html`<span class="avatar avatar-initials" style="--size:${size}px;--avatar-bg:${colorFor(u && u.username || name)}" aria-hidden="true">${initials(name)}</span>`;
 }
 
+/**
+ * "Job title, Team / Dept @ Organization". Team and organization are optional;
+ * without an organization it reads "Job title, Team / Dept".
+ */
+function roleLine(u) {
+  if (!u) return '';
+  const left = [u.job_title, u.department].map((x) => String(x || '').trim()).filter(Boolean).join(', ');
+  const org = String(u.organization || '').trim();
+  if (left && org) return `${left} @ ${org}`;
+  return left || org;
+}
+
 function userLink(username, name) {
   if (!username) return html`<span class="muted">Beacon</span>`;
   return html`<a class="user-link" href="/u/${encodeURIComponent(username)}">${name || username}</a>`;
@@ -47,7 +59,34 @@ function tagList(tags) {
 }
 
 function spaceBadge(a) {
-  return html`<a class="space-badge" href="/s/${a.space_slug}" style="--space:${a.space_color}">${a.space_name}</a>`;
+  const parent = a.parent_space_slug ? html`<a class="space-parent" href="/s/${a.parent_space_slug}">${a.parent_space_name}</a><span class="space-sep" aria-hidden="true">/</span>` : '';
+  return html`<span class="space-badge" style="--space:${a.space_color}">${parent}<a href="/s/${a.space_slug}">${a.space_name}</a></span>`;
+}
+
+/**
+ * Space navigation tree. `tree` comes from lib/spaces.spaceTree().
+ * activeId highlights the current space and keeps its parent open.
+ */
+function spaceNav(ctx, { tree, activeId, id = 'space-nav', title = true } = {}) {
+  tree = tree || ctx.spaceTree();
+  const isActive = (sp) => sp.id === activeId;
+  const link = (sp, sub) => html`<a class="space-link ${sub ? 'is-sub' : ''}" href="/s/${sp.slug}" style="--space:${sp.color}" ${isActive(sp) ? raw('aria-current="page"') : ''}>
+      <span class="space-dot" aria-hidden="true"></span><span class="space-link-name">${sp.name}</span><span class="space-count">${sub ? sp.own : sp.total}</span></a>`;
+  return html`
+  <nav class="space-nav" aria-label="Spaces" id="${id}">
+    ${title ? html`<p class="rail-title">Spaces</p>` : ''}
+    <ul class="space-tree">
+      ${tree.map((sp) => html`<li>
+        ${link(sp, false)}
+        ${sp.children.length ? html`<ul>${sp.children.map((c) => html`<li>${link(c, true)}</li>`)}</ul>` : ''}
+      </li>`)}
+    </ul>
+    <ul class="space-tree space-tree-extra">
+      <li><a class="space-link" href="/articles" ${ctx.url.pathname === '/articles' ? raw('aria-current="page"') : ''}><span class="space-link-name">All articles</span></a></li>
+      <li><a class="space-link" href="/tags" ${ctx.url.pathname.startsWith('/tags') ? raw('aria-current="page"') : ''}><span class="space-link-name">Tags</span></a></li>
+    </ul>
+    ${ctx.can('spaces.manage') ? html`<a class="rail-manage" href="/admin/spaces">Manage spaces</a>` : ''}
+  </nav>`;
 }
 
 function statusBadge(status) {
@@ -149,18 +188,12 @@ function hasAdminAccess(ctx) {
 function header(ctx) {
   const u = ctx.user;
   const s = ctx.settings;
-  const current = (p) => (ctx.url.pathname === p || ctx.url.pathname.startsWith(p + '/') ? raw('aria-current="page"') : '');
   const readable = ctx.can('articles.read');
   return html`
   <header class="site-header">
     <div class="header-inner">
       <a class="brand" href="/" aria-label="${s.site_name} home">${logo(30)}${wordmark(s.site_name)}</a>
       ${readable ? html`
-      <nav class="main-nav" id="main-nav" aria-label="Main">
-        ${ctx.spaces.map((sp) => html`<a href="/s/${sp.slug}" ${current('/s/' + sp.slug)} style="--space:${sp.color}"><span class="space-dot"></span>${sp.name}</a>`)}
-        <a href="/tags" ${current('/tags')}>Tags</a>
-        <a href="/people" ${current('/people')}>People</a>
-      </nav>
       <form class="header-search" action="/search" method="get" role="search">
         ${icon('search', { size: 17 })}
         <input type="search" name="q" placeholder="Search" aria-label="Search the wiki" value="${ctx.url.pathname === '/search' ? ctx.query.q || '' : ''}" autocomplete="off">
@@ -191,7 +224,7 @@ function header(ctx) {
         </div>` : html`
         <a class="btn btn-ghost btn-sm" href="/login">Sign in</a>
         ${s.registration !== 'closed' ? html`<a class="btn btn-sm" href="/register">Create account</a>` : ''}`}
-        ${readable ? html`<button type="button" class="icon-btn nav-toggle" data-nav-toggle aria-controls="main-nav" aria-expanded="false" aria-label="Menu">${icon('menu')}</button>` : ''}
+        ${readable ? html`<button type="button" class="btn btn-ghost btn-sm spaces-btn" data-drawer-open aria-controls="spaces-drawer" aria-expanded="false">${icon('space', { size: 17, cls: 'spaces-btn-wide' })}${icon('menu', { size: 19, cls: 'spaces-btn-narrow' })}<span>Spaces</span></button>` : ''}
       </div>
     </div>
   </header>`;
@@ -205,6 +238,7 @@ function flashes(ctx) {
 }
 
 function layout(ctx, { title, body, bodyClass = '', scripts = [], wide = false }) {
+  if (body && /class="rail[" ]/.test(String(body))) bodyClass = `${bodyClass} has-rail`.trim();
   const s = ctx.settings;
   const v = ctx.assetVersion;
   const fullTitle = title ? `${title} – ${s.site_name}` : s.site_name;
@@ -228,6 +262,12 @@ function layout(ctx, { title, body, bodyClass = '', scripts = [], wide = false }
   <main id="main" class="${wide ? 'main main-wide' : 'main'}">
     ${body}
   </main>
+  ${ctx.can('articles.read') ? html`
+  <div class="drawer-backdrop" data-drawer-close hidden></div>
+  <aside class="drawer" id="spaces-drawer" aria-label="Spaces" hidden>
+    <div class="drawer-head"><p class="rail-title">Spaces</p><button type="button" class="icon-btn" data-drawer-close aria-label="Close">${icon('x')}</button></div>
+    ${spaceNav(ctx, { id: 'drawer-space-nav', title: false, activeId: ctx.activeSpaceId })}
+  </aside>` : ''}
   <footer class="site-footer">
     <span>${s.site_name}</span>
     ${ctx.user ? html`<a href="/help/markdown">Formatting guide</a>` : ''}
@@ -244,6 +284,6 @@ function authLayout(ctx, { title, body }) {
 }
 
 module.exports = {
-  layout, authLayout, avatar, userLink, tagChip, tagList, spaceBadge, statusBadge, csrfField,
+  layout, authLayout, avatar, userLink, roleLine, tagChip, tagList, spaceBadge, spaceNav, statusBadge, csrfField,
   input, textarea, select, fieldError, pagination, emptyState, articleRow, colorFor, hasAdminAccess, icon,
 };

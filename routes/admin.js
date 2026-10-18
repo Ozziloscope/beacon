@@ -7,6 +7,9 @@ const { ALL, PERMISSIONS } = require('../lib/permissions');
 const { HttpError } = require('../lib/http');
 const { fmtBytes } = require('../lib/html');
 const views = require('../views/admin');
+const mail = require('../lib/mail');
+const emails = require('../lib/emails');
+const Resets = require('../lib/resets');
 
 const PER_PAGE = 50;
 const HEX = /^#[0-9a-fA-F]{6}$/;
@@ -89,6 +92,7 @@ module.exports = function register(router, { requireUser, requirePerm }) {
       sessions: auth.listSessions(target.id),
       auditRows: ctx.can('audit.view') ? auditRows('WHERE l.target = ?', [`@${target.username}`], 25) : [],
       isLastAdmin: isLastAdmin(target),
+      mailReady: mail.isConfigured(ctx.settings),
       ...extra,
     }));
   }
@@ -119,7 +123,17 @@ module.exports = function register(router, { requireUser, requirePerm }) {
     if (!role || !auth.canAssignRole(ctx.user, role)) role = getRoleByKey('reader');
     run("UPDATE users SET status = 'active', role_id = ? WHERE id = ?", role.id, target.id);
     audit(ctx.user.id, 'user.approve', `@${target.username}`, `as ${role.name}`, ctx.ip);
-    ctx.setFlash('success', `Approved @${target.username} as ${role.name}. They can sign in now.`);
+    let note = 'They can sign in now.';
+    if (mail.isConfigured(ctx.settings)) {
+      try {
+        const msg = emails.accountApproved({ site: ctx.settings.site_name, name: target.display_name.split(' ')[0], username: target.username, link: `${ctx.publicUrl()}/login` });
+        await mail.send({ to: target.email, ...msg }, ctx.settings);
+        note = `We emailed ${target.email} to let them know.`;
+      } catch (err) {
+        note = `They can sign in now, but the notice email failed: ${err.message}`;
+      }
+    }
+    ctx.setFlash('success', `Approved @${target.username} as ${role.name}. ${note}`);
     return ctx.redirect(form.back === 'overview' ? '/admin' : `/admin/users/${target.id}`);
   });
 
@@ -152,14 +166,28 @@ module.exports = function register(router, { requireUser, requirePerm }) {
     await ctx.form();
     const target = loadTarget(ctx);
     requireManage(ctx, target);
-    const temp = auth.randomPassword();
-    tx(() => {
-      run('UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?', auth.hashPassword(temp), target.id);
-      auth.destroyUserSessions(target.id);
-      audit(ctx.user.id, 'user.reset_password', `@${target.username}`, 'Temporary password issued', ctx.ip);
-    });
     ctx.res.setHeader('Cache-Control', 'no-store');
-    return renderUser(ctx, auth.loadUser(target.id), { tempPassword: temp });
+    // Lock the account first: the old password stops working and every session ends.
+    tx(() => {
+      run('UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?', auth.hashPassword(auth.randomPassword() + auth.randomPassword()), target.id);
+      auth.destroyUserSessions(target.id);
+      audit(ctx.user.id, 'user.reset_password', `@${target.username}`, 'Password reset by an admin', ctx.ip);
+    });
+    let mailError = null;
+    if (mail.isConfigured(ctx.settings) && target.status === 'active') {
+      try {
+        await Resets.sendLink(target, { baseUrl: ctx.publicUrl(), byAdmin: true, requestedBy: ctx.user.id, ip: ctx.ip });
+        ctx.setFlash('success', `Reset link emailed to ${target.email}. It works once, for 24 hours. Their old password no longer works.`);
+        return ctx.redirect(`/admin/users/${target.id}`);
+      } catch (err) {
+        mailError = err.message;
+        audit(ctx.user.id, 'mail.error', `@${target.username}`, `Reset link not sent: ${err.message}`, ctx.ip);
+      }
+    }
+    // Email isn't available: fall back to a one-time temporary password the admin passes on.
+    const temp = auth.randomPassword();
+    run('UPDATE users SET password_hash = ?, must_change_password = 1 WHERE id = ?', auth.hashPassword(temp), target.id);
+    return renderUser(ctx, auth.loadUser(target.id), { tempPassword: temp, mailError, mailReady: mail.isConfigured(ctx.settings) });
   });
 
   router.post('/admin/users/:id/signout', requirePerm('users.manage'), async (ctx) => {
@@ -334,7 +362,9 @@ module.exports = function register(router, { requireUser, requirePerm }) {
   // -------------------------------------------------------------------------
   // Spaces
   // -------------------------------------------------------------------------
-  const spaceRows = () => all('SELECT s.*, (SELECT COUNT(*) FROM articles a WHERE a.space_id = s.id) AS count FROM spaces s ORDER BY s.sort, s.name');
+  const spaceRows = () => all(`SELECT s.*, (SELECT COUNT(*) FROM articles a WHERE a.space_id = s.id) AS count,
+      (SELECT COUNT(*) FROM spaces c WHERE c.parent_id = s.id) AS child_count
+    FROM spaces s ORDER BY s.sort, s.name COLLATE NOCASE`);
 
   router.get('/admin/spaces', requirePerm('spaces.manage'), (ctx) => ctx.html(views.spaces(ctx, { rows: spaceRows() })));
 
@@ -345,10 +375,17 @@ module.exports = function register(router, { requireUser, requirePerm }) {
     const description = String(form.description || '').trim().slice(0, 200);
     const color = HEX.test(form.color || '') ? form.color : null;
     const sort = Math.max(0, Math.min(999, parseInt(form.sort, 10) || 0));
+    let parentId = parseInt(form.parent_id, 10) || null;
     if (!name) errors.name = 'Name the space.';
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) errors.slug = 'Use lowercase letters, numbers and hyphens.';
     else if (get('SELECT 1 FROM spaces WHERE slug = ? AND id != ?', slug, id)) errors.slug = 'Another space already uses that URL.';
-    return { errors, values: { name, slug, description, color, sort } };
+    if (parentId) {
+      const parent = get('SELECT * FROM spaces WHERE id = ?', parentId);
+      if (!parent || parent.id === id) errors.parent_id = 'Pick a different main space.';
+      else if (parent.parent_id) errors.parent_id = `${parent.name} is itself a sub-space. Sub-spaces go one level deep.`;
+      else if (id && get('SELECT 1 FROM spaces WHERE parent_id = ?', id)) errors.parent_id = 'This space has sub-spaces of its own, so it has to stay a main space.';
+    }
+    return { errors, values: { name, slug, description, color, sort, parentId } };
   }
 
   router.post('/admin/spaces', requirePerm('spaces.manage'), async (ctx) => {
@@ -356,10 +393,11 @@ module.exports = function register(router, { requireUser, requirePerm }) {
     const { errors, values } = spaceFields(form);
     if (Object.keys(errors).length) return ctx.html(views.spaces(ctx, { rows: spaceRows(), errors, values: form }), 422);
     const maxSort = get('SELECT COALESCE(MAX(sort), 0) AS m FROM spaces').m;
-    run('INSERT INTO spaces (slug, name, description, color, sort, created_at) VALUES (?,?,?,?,?,?)',
-      values.slug, values.name, values.description, values.color || '#5B6FA8', maxSort + 1, now());
+    const parent = values.parentId ? get('SELECT color FROM spaces WHERE id = ?', values.parentId) : null;
+    run('INSERT INTO spaces (slug, name, description, color, sort, parent_id, created_at) VALUES (?,?,?,?,?,?,?)',
+      values.slug, values.name, values.description, values.color || (parent && parent.color) || '#5B6FA8', maxSort + 1, values.parentId, now());
     audit(ctx.user.id, 'space.create', values.name, `/s/${values.slug}`, ctx.ip);
-    ctx.setFlash('success', `Added the ${values.name} space.`);
+    ctx.setFlash('success', values.parentId ? `Added the ${values.name} sub-space.` : `Added the ${values.name} space.`);
     return ctx.redirect('/admin/spaces');
   });
 
@@ -369,8 +407,8 @@ module.exports = function register(router, { requireUser, requirePerm }) {
     if (!space) throw new HttpError(404, "That space doesn't exist.");
     const { errors, values } = spaceFields(form, space.id);
     if (Object.keys(errors).length) { ctx.setFlash('error', Object.values(errors).join(' ')); return ctx.redirect('/admin/spaces'); }
-    run('UPDATE spaces SET name = ?, slug = ?, description = ?, color = ?, sort = ? WHERE id = ?',
-      values.name, values.slug, values.description, values.color || space.color, values.sort, space.id);
+    run('UPDATE spaces SET name = ?, slug = ?, description = ?, color = ?, sort = ?, parent_id = ? WHERE id = ?',
+      values.name, values.slug, values.description, values.color || space.color, values.sort, values.parentId, space.id);
     audit(ctx.user.id, 'space.update', values.name, '', ctx.ip);
     ctx.setFlash('success', `Saved the ${values.name} space.`);
     return ctx.redirect('/admin/spaces');
@@ -382,6 +420,7 @@ module.exports = function register(router, { requireUser, requirePerm }) {
     if (!space) throw new HttpError(404, "That space doesn't exist.");
     if (get('SELECT 1 FROM articles WHERE space_id = ?', space.id)) throw new HttpError(400, 'Move or delete the articles in this space first, including any in the trash.');
     if (get('SELECT COUNT(*) AS n FROM spaces').n <= 1) throw new HttpError(400, 'Keep at least one space.');
+    if (get('SELECT 1 FROM spaces WHERE parent_id = ?', space.id)) throw new HttpError(400, 'Move or delete its sub-spaces first.');
     run('DELETE FROM spaces WHERE id = ?', space.id);
     audit(ctx.user.id, 'space.delete', space.name, '', ctx.ip);
     ctx.setFlash('success', `Deleted the ${space.name} space.`);
@@ -404,7 +443,7 @@ module.exports = function register(router, { requireUser, requirePerm }) {
   // Settings and audit
   // -------------------------------------------------------------------------
   router.get('/admin/settings', requirePerm('settings.manage'), (ctx) => {
-    return ctx.html(views.settings(ctx, { values: getSettings(), roles: listRoles() }));
+    return ctx.html(views.settings(ctx, { values: getSettings(), roles: listRoles(), mailReady: mail.isConfigured(), detectedUrl: ctx.publicUrl() }));
   });
 
   router.post('/admin/settings', requirePerm('settings.manage'), async (ctx) => {
@@ -417,22 +456,53 @@ module.exports = function register(router, { requireUser, requirePerm }) {
       default_role: String(form.default_role || 'reader'),
       require_login: form.require_login === '1' ? '1' : '0',
       allowed_email_domains: String(form.allowed_email_domains || '').split(',').map((d) => d.trim().toLowerCase().replace(/^@/, '')).filter(Boolean).join(', '),
+      site_url: String(form.site_url || '').trim().replace(/\/+$/, ''),
+      about_text: String(form.about_text || '').replace(/\r\n?/g, '\n').trim().slice(0, 4000),
+      smtp_host: String(form.smtp_host || '').trim().slice(0, 200),
+      smtp_port: String(parseInt(form.smtp_port, 10) || ''),
+      smtp_security: ['starttls', 'tls', 'none'].includes(form.smtp_security) ? form.smtp_security : 'starttls',
+      smtp_user: String(form.smtp_user || '').trim().slice(0, 200),
+      mail_from: String(form.mail_from || '').replace(/[\r\n]/g, '').trim().slice(0, 200),
     };
+    // A blank password box keeps the saved one; tick "remove" to clear it.
+    if (form.smtp_pass_clear === '1') values.smtp_pass = '';
+    else if (String(form.smtp_pass || '') !== '') values.smtp_pass = String(form.smtp_pass).slice(0, 500);
+    if (values.site_url) {
+      try {
+        const u = new URL(values.site_url);
+        if (!/^https?:$/.test(u.protocol)) throw new Error();
+        values.site_url = u.origin;
+      } catch { errors.site_url = 'Enter the full address people use, like https://wiki.example.com.'; }
+    }
+    if (values.smtp_host && !values.smtp_port) values.smtp_port = values.smtp_security === 'tls' ? '465' : '587';
+    if (values.smtp_host && !mail.addressOf(values.mail_from)) errors.mail_from = 'Enter the address emails come from, like Beacon <wiki@example.com>.';
     if (!values.site_name) errors.site_name = 'Give the site a name.';
     const role = getRoleByKey(values.default_role) || getRole(parseInt(values.default_role, 10));
     if (!role || role.key === 'admin') errors.default_role = 'Choose a role other than Admin for new accounts.';
     for (const d of values.allowed_email_domains ? values.allowed_email_domains.split(', ') : []) {
       if (!/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(d)) errors.allowed_email_domains = `“${d}” isn't a valid domain.`;
     }
-    if (Object.keys(errors).length) return ctx.html(views.settings(ctx, { values, roles: listRoles(), errors }), 422);
+    if (Object.keys(errors).length) return ctx.html(views.settings(ctx, { values: { ...getSettings(), ...values }, roles: listRoles(), errors, mailReady: mail.isConfigured() }), 422);
     const before = getSettings();
     const changed = Object.keys(values).filter((k) => before[k] !== values[k]);
+    const show = (k, v) => (k === 'smtp_pass' ? (v ? '(set)' : '(empty)') : k === 'about_text' ? '(edited)' : v);
     tx(() => {
       for (const k of changed) setSetting(k, values[k]);
-      if (changed.length) audit(ctx.user.id, 'settings.update', 'settings', changed.map((k) => `${k}: ${before[k]} → ${values[k]}`).join('; '), ctx.ip);
+      if (changed.length) audit(ctx.user.id, 'settings.update', 'settings', changed.map((k) => `${k}: ${show(k, before[k])} → ${show(k, values[k])}`).join('; '), ctx.ip);
     });
     ctx.setFlash('success', changed.length ? 'Settings saved.' : 'No settings changed.');
     return ctx.redirect('/admin/settings');
+  });
+
+  router.post('/admin/settings/test-email', requirePerm('settings.manage'), async (ctx) => {
+    await ctx.form();
+    try {
+      await mail.send({ to: ctx.user.email, ...emails.testMessage({ site: ctx.settings.site_name, name: ctx.user.display_name.split(' ')[0] }) }, ctx.settings);
+      ctx.setFlash('success', `Test email sent to ${ctx.user.email}. Check that it arrived (and isn't in spam).`);
+    } catch (err) {
+      ctx.setFlash('error', `The test email wasn't sent: ${err.message}`);
+    }
+    return ctx.redirect('/admin/settings#email');
   });
 
   router.get('/admin/audit', requirePerm('audit.view'), (ctx) => {

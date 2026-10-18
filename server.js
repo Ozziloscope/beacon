@@ -10,6 +10,7 @@ const auth = require('./lib/auth');
 const { HttpError, Router, parseCookies, readBody, parseForm, clientIp, isSecure, cookie, sendFile } = require('./lib/http');
 const { html } = require('./lib/html');
 const ui = require('./views/ui');
+const Spaces = require('./lib/spaces');
 
 const SESSION_COOKIE = 'beacon_session';
 const CSRF_COOKIE = 'beacon_csrf';
@@ -138,8 +139,17 @@ async function handle(req, res) {
     flash: [],
     sent: false,
     wantsJson: pathname.startsWith('/api/') || String(req.headers.accept || '').includes('application/json'),
-    spaces: db.all('SELECT * FROM spaces ORDER BY sort, name'),
+    spaces: Spaces.listSpaces(),
+    activeSpaceId: null,
   };
+  // Public address for links in emails: the configured one, else this request's origin.
+  ctx.publicUrl = () => {
+    if (settings.site_url) return settings.site_url.replace(/\/+$/, '');
+    const host = String((config.trustProxy && req.headers['x-forwarded-host']) || req.headers.host || `localhost:${config.port}`).split(',')[0].trim();
+    return `${secure ? 'https' : 'http'}://${host}`;
+  };
+  let treeMemo = null;
+  ctx.spaceTree = () => (treeMemo || (treeMemo = Spaces.spaceTree(ctx.user)));
 
   // Session
   const token = cookies[SESSION_COOKIE];
